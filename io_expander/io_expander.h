@@ -2,6 +2,7 @@
 #define IO_EXPANDER_H
 
 #include "periph/i2c.h"
+#include "periph/uart.h"
 #include "periph/gpio.h"
 #include "etl/array.h"
 
@@ -17,17 +18,19 @@ namespace Project {
         mutable T writeBuffer = 0, readBuffer = 0;
 
     public:
-        periph::I2C& i2c;
+        periph::I2C* i2c;
+        periph::UART* uart;
         uint8_t address; ///< device 7 bit address
 
         struct Constructor1Args { periph::I2C& i2c; uint8_t address;};
         struct Constructor2Args { periph::I2C& i2c; bool a2, a1, a0;};
+        struct Constructor3Args { periph::UART& uart; };
         
         /// construct with specified address
         /// @param args
         ///     - .i2c reference to periph::I2C object 
         ///     - .address device address
-        constexpr IOExpander(Constructor1Args args) : i2c(args.i2c), address(args.address) {}
+        constexpr IOExpander(Constructor1Args args) : i2c(&args.i2c), uart(nullptr), address(args.address) {}
 
         /// construct with specified input pins state
         /// @param args
@@ -35,7 +38,13 @@ namespace Project {
         ///     - .a2 input pin a2 state
         ///     - .a1 input pin a1 state
         ///     - .a0 input pin a0 state
-        constexpr IOExpander(Constructor2Args args) : i2c(args.i2c), address(addressReference(args.a2, args.a1, args.a0)) {}
+        constexpr IOExpander(Constructor2Args args) : i2c(&args.i2c), uart(nullptr), address(addressReference(args.a2, args.a1, args.a0)) {}
+
+        /// construct with specified address
+        /// @param args
+        ///     - .uart reference to periph::UART object 
+        ///     - .address device address
+        constexpr IOExpander(Constructor3Args args) : i2c(nullptr), uart(&args.uart), address(0) {}
 
         IOExpander(const IOExpander&) = delete; ///< disable copy constructor
         IOExpander& operator=(const IOExpander&) = delete; ///< disable copy assignment
@@ -45,7 +54,10 @@ namespace Project {
         /// @param timeout in tick. default = timeoutDefault
         void write(T value, uint32_t timeout = timeoutDefault) const { 
             auto buffer = etl::byte_array_cast_le<T>(value);
-            HAL_I2C_Master_Transmit(&i2c.hi2c, address, buffer.data(), buffer.len(), timeout); 
+            if (i2c)
+                HAL_I2C_Master_Transmit(&i2c->hi2c, address, buffer.data(), buffer.len(), timeout); 
+            if (uart)
+                uart->transmitBlocking(buffer.data(), buffer.len(), {.timeout=etl::time::milliseconds(timeout)});
             writeBuffer = value; // save to write buffer
         }
 
@@ -54,10 +66,14 @@ namespace Project {
         /// @return value from the io expander
         T read(uint32_t timeout = timeoutDefault) const { 
             auto buffer = etl::array<uint8_t, NBytes>();
-            HAL_I2C_Master_Receive(&i2c.hi2c, address, buffer.data(), buffer.len(), timeout); 
-            T res = etl::byte_array_cast_back_le<T>(buffer);
-            if (res & readMode) readBuffer |= res; // only save to buffer if the pin is in read mode
-            return res;
+            if (i2c) {
+                HAL_I2C_Master_Receive(&i2c->hi2c, address, buffer.data(), buffer.len(), timeout); 
+                T res = etl::byte_array_cast_back_le<T>(buffer);
+                if (res & readMode) readBuffer |= res; // only save to buffer if the pin is in read mode
+                return res;
+            }
+            // uart not supported yet
+            return 0;
         }
 
         struct GPIO;
