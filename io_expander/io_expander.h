@@ -6,11 +6,7 @@
 #include "periph/gpio.h"
 #include "etl/array.h"
 
-namespace Project {
-    template <size_t NBytes> class IOExpander;
-    struct IO;
-}
-
+namespace Project { template <size_t NBytes> class IOExpander; struct IO; }
 
 /// IO expander port definition
 /// @tparam NBytes number of bytes the 
@@ -24,19 +20,29 @@ class Project::IOExpander {
     mutable T writeBuffer = 0, readBuffer = 0;
 
 public:
+    #ifdef HAL_I2C_MODULE_ENABLED
     periph::I2C* i2c;
-    periph::UART* uart;
     uint8_t address; ///< device 7 bit address
+    struct ConstructorI2CArgs { periph::I2C& i2c; uint8_t address;};
+    struct ConstructorI2CArgs2 { periph::I2C& i2c; bool a2, a1, a0;};
+    #endif
 
-    struct Constructor1Args { periph::I2C& i2c; uint8_t address;};
-    struct Constructor2Args { periph::I2C& i2c; bool a2, a1, a0;};
-    struct Constructor3Args { periph::UART& uart; };
+    #ifdef HAL_UART_MODULE_ENABLED 
+    periph::UART* uart;
+    struct ConstructorUARTArgs { periph::UART& uart; };
+    #endif
+
     
+    #ifdef HAL_I2C_MODULE_ENABLED
     /// construct with specified address
     /// @param args
     ///     - .i2c reference to periph::I2C object 
     ///     - .address device address
-    constexpr IOExpander(Constructor1Args args) : i2c(&args.i2c), uart(nullptr), address(args.address) {}
+    constexpr IOExpander(ConstructorI2CArgs args) : i2c(&args.i2c) , address(args.address)
+        #ifdef HAL_UART_MODULE_ENABLED 
+        , uart(nullptr) 
+        #endif
+        {}
 
     /// construct with specified input pins state
     /// @param args
@@ -44,13 +50,24 @@ public:
     ///     - .a2 input pin a2 state
     ///     - .a1 input pin a1 state
     ///     - .a0 input pin a0 state
-    constexpr IOExpander(Constructor2Args args) : i2c(&args.i2c), uart(nullptr), address(addressReference(args.a2, args.a1, args.a0)) {}
+    constexpr IOExpander(ConstructorI2CArgs2 args) : i2c(&args.i2c), address(addressReference(args.a2, args.a1, args.a0))
+        #ifdef HAL_UART_MODULE_ENABLED 
+        , uart(nullptr)
+        #endif
+        {}
+    #endif
 
+    #ifdef HAL_UART_MODULE_ENABLED 
     /// construct with specified address
     /// @param args
     ///     - .uart reference to periph::UART object 
     ///     - .address device address
-    constexpr IOExpander(Constructor3Args args) : i2c(nullptr), uart(&args.uart), address(0) {}
+    constexpr IOExpander(ConstructorUARTArgs args) : 
+        #ifdef HAL_I2C_MODULE_ENABLED
+        i2c(nullptr), address(0),
+        #endif
+        uart(&args.uart) {}
+    #endif
 
     IOExpander(const IOExpander&) = delete; ///< disable copy constructor
     IOExpander& operator=(const IOExpander&) = delete; ///< disable copy assignment
@@ -60,10 +77,14 @@ public:
     /// @param timeout in tick. default = timeoutDefault
     void write(T value, uint32_t timeout = timeoutDefault) const { 
         auto buffer = etl::byte_array_cast_le<T>(value);
+        #ifdef HAL_I2C_MODULE_ENABLED
         if (i2c)
             HAL_I2C_Master_Transmit(&i2c->hi2c, address, buffer.data(), buffer.len(), timeout); 
+        #endif
+        #ifdef HAL_UART_MODULE_ENABLED 
         if (uart)
             uart->transmitBlocking(buffer.data(), buffer.len(), {.timeout=etl::time::milliseconds(timeout)});
+        #endif
         writeBuffer = value; // save to write buffer
     }
 
@@ -72,13 +93,17 @@ public:
     /// @return value from the io expander
     T read(uint32_t timeout = timeoutDefault) const { 
         auto buffer = etl::array<uint8_t, NBytes>();
+        #ifdef HAL_I2C_MODULE_ENABLED
         if (i2c) {
             HAL_I2C_Master_Receive(&i2c->hi2c, address, buffer.data(), buffer.len(), timeout); 
             T res = etl::byte_array_cast_back_le<T>(buffer);
             if (res & readMode) readBuffer |= res; // only save to buffer if the pin is in read mode
             return res;
         }
+        #endif
+        #ifdef HAL_UART_MODULE_ENABLED 
         // uart not supported yet
+        #endif
         return 0;
     }
 
@@ -91,9 +116,9 @@ private:
 // GPIO expander struct
 template <size_t NBytes>
 struct Project::IOExpander<NBytes>::GPIO {
-    const IOExpander<NBytes>* port = nullptr; ///< reference to IOExpander object
-    IOExpander<NBytes>::T pin = 0;      ///< GPIO_PIN_x
-    bool activeMode = false;            ///< periph::GPIO::activeLow or periph::GPIO::activeHigh
+    const IOExpander<NBytes>* port = nullptr;   ///< reference to IOExpander object
+    IOExpander<NBytes>::T pin = 0;              ///< GPIO_PIN_x
+    bool activeMode = false;                    ///< periph::GPIO::activeLow or periph::GPIO::activeHigh
 
     /// init GPIO, early init
     /// @param args
@@ -125,9 +150,11 @@ struct Project::IOExpander<NBytes>::GPIO {
 
     /// read pin
     /// @retval high (true) or low (false)
-    [[nodiscard]] bool read() const {
+    [[nodiscard]] 
+    bool read() const {
         if (pin & port->writeMode) // if pin is in write mode, return pin status in write buffer
             return pin & port->writeBuffer;
+        
         port->read();
         return pin & port->readBuffer;
     }
@@ -148,16 +175,19 @@ struct Project::IOExpander<NBytes>::GPIO {
         etl::time::sleep(args.sleepFor);
     }
 
-    [[nodiscard]] bool isOn() const { return !(read() ^ activeMode); }
-    [[nodiscard]] bool isOff() const { return (read() ^ activeMode); }
+    [[nodiscard]] 
+    bool isOn() const { return !(read() ^ activeMode); }
+    
+    [[nodiscard]] 
+    bool isOff() const { return (read() ^ activeMode); }
 };
 
 /// IO expander and GPIO peripheral
 struct Project::IO {
-    const IOExpander<2>* portExpander;    ///< pointer to IOExpander object
-    GPIO_TypeDef* portGPIO;         ///< pointer to GPIOx
-    uint16_t pin;                   ///< GPIO_PIN_x
-    bool activeMode;                ///< periph::GPIO::activeLow or periph::GPIO::activeHigh
+    const IOExpander<2>* portExpander;      ///< pointer to IOExpander object
+    GPIO_TypeDef* portGPIO;                 ///< pointer to GPIOx
+    uint16_t pin;                           ///< GPIO_PIN_x
+    bool activeMode;                        ///< periph::GPIO::activeLow or periph::GPIO::activeHigh
 
     /// empty constructor
     constexpr IO() 
@@ -213,7 +243,8 @@ struct Project::IO {
 
     /// read pin
     /// @retval high (true) or low (false)
-    [[nodiscard]] bool read() const {
+    [[nodiscard]] 
+    bool read() const {
         if (portExpander)
             return IOExpander<2>::GPIO{portExpander, pin, activeMode}.read();
         if (portGPIO)
@@ -224,7 +255,7 @@ struct Project::IO {
     /// turn on
     /// @param args
     ///     - .sleepFor sleep for a while. default = time::immediate
-    void on(periph::GPIO::OnOffArgs args = periph::GPIO::OnOffDefault) const {
+    void on(periph::GPIO::OnOffArgs args = periph::GPIO::OnOffArgs{}) const {
         if (portExpander)
             IOExpander<2>::GPIO{portExpander, pin, activeMode}.on(args);
         if (portGPIO)
@@ -234,15 +265,18 @@ struct Project::IO {
     /// turn off
     /// @param args
     ///     - .sleepFor sleep for a while. default = time::immediate
-    void off(periph::GPIO::OnOffArgs args = periph::GPIO::OnOffDefault) const {
+    void off(periph::GPIO::OnOffArgs args = periph::GPIO::OnOffArgs{}) const {
         if (portExpander)
             IOExpander<2>::GPIO{portExpander, pin, activeMode}.off(args);
         if (portGPIO)
             periph::GPIO{portGPIO, pin, activeMode}.off(args); 
     }
 
-    [[nodiscard]] bool isOn() const { return !(read() ^ activeMode); }
-    [[nodiscard]] bool isOff() const { return (read() ^ activeMode); }
+    [[nodiscard]] 
+    bool isOn() const { return !(read() ^ activeMode); }
+    
+    [[nodiscard]] 
+    bool isOff() const { return (read() ^ activeMode); }
 };
 
 #endif // IO_EXPANDER_H
